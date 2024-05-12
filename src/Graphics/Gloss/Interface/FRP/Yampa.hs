@@ -1,3 +1,7 @@
+{-# LANGUAGE Arrows #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 -- |
 -- Copyright  : (c) 2018-2023 Ivan Perez
 --              (c) 2015-2018 Konstantin Saveljev
@@ -14,19 +18,27 @@
 -- driven by a signal function that transforms a Gloss input signal into a
 -- Gloss 'Picture'.
 module Graphics.Gloss.Interface.FRP.Yampa
-    (InputEvent, playYampa)
+    (InputEvent, playYampa, reactInitInteract)
   where
 
 -- External imports
-import           Control.Monad                    (when)
+import           Control.Monad                    (when,void,forever)
 import           Data.IORef                       (newIORef, readIORef,
-                                                   writeIORef)
+                                                   writeIORef, modifyIORef)
 import           FRP.Yampa                        (DTime, Event (..), SF, react,
-                                                   reactInit)
+                                                   reactInit, ReactHandle, (&&&), returnA, time)
 import           Graphics.Gloss                   (Color, Display, Picture,
                                                    blank)
 import           Graphics.Gloss.Interface.IO.Game (playIO)
 import qualified Graphics.Gloss.Interface.IO.Game as G
+import qualified Graphics.Gloss.Interface.IO.Interact as Gloss.Interact
+import Graphics.Gloss.Interface.IO.Interact (controllerSetRedraw)
+import Control.Concurrent
+import Control.Monad
+import System.CPUTime
+import System.IO
+import System.Timeout
+--import Control.Concurrent.QSem
 
 -- | Type representing input events to the signal function.
 --
@@ -74,3 +86,79 @@ playYampa display color frequency mainSF = do
           delta' = realToFrac delta - timeAcc
 
   playIO display color frequency 0 toPic handleInput stepWorld
+
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+reactInitInteract ::
+
+    -- | Viewport style.
+    Display ->
+
+    -- | Background color.
+    Color ->
+
+    -- | Initial state.
+    s ->
+
+    -- | Description of how the picture changes.
+    SF s Picture ->
+
+    -- | A handle to react to inputs from Gloss.
+    (ReactHandle (Event InputEvent) a) ->
+
+    -- | We return a handle to generate pictures.
+    IO (ReactHandle s Picture)
+
+{-# INLINABLE reactInitInteract #-}
+
+reactInitInteract display color state sf callbackHandle = do
+    picRef   <- newIORef mempty
+    redrawFn <- newIORef (pure ())
+    _        <- forkIO do
+                        Gloss.Interact.interactIO
+                            display
+                            color
+                            picRef
+                            readIORef
+                            handleEvent
+                            (writeIORef redrawFn . controllerSetRedraw)
+    reactInit (pure state) (actuate redrawFn picRef) sf
+  where
+    actuate redrawFnRef picRef handle updated pic = do
+        when updated do
+            -- we pass the picture generated in yampa to the draw fn
+            writeIORef picRef pic
+            -- we run the redraw function
+            join (readIORef redrawFnRef)
+        pure False
+    handleEvent ev s = do
+        react callbackHandle (0.0, Just (Event ev))
+        pure s
+
+
+-- TODO move somewhere else?
+_testInteractYampa :: IO ()
+_testInteractYampa = do
+    let fps    = 60
+    let dt     = 1 / realToFrac fps
+    let tdelay = round (realToFrac 1000000 * dt)
+    eventCallbackHandle <- reactInit (pure NoEvent) (\_ updated ev -> when updated (print ev) >> pure False) returnA
+    h <- reactInitInteract
+            Gloss.Interact.FullScreen
+            Gloss.Interact.white
+            0
+            (proc cpuTime -> do
+                    localTime <- time -< ()
+                    returnA -< Gloss.Interact.Pictures
+                                     [ Gloss.Interact.circle (10 * realToFrac localTime)
+                                     , Gloss.Interact.scale 0.7 0.7 (Gloss.Interact.text (show cpuTime))
+                                     ]
+            )
+            eventCallbackHandle
+    forever do
+        threadDelay tdelay
+        t <- getCPUTime
+        react h (dt, Just t) 
+

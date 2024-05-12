@@ -47,6 +47,7 @@ executable yampa-examples-gloss-rotatingcolor
                        , gloss       >= 1.10  && <1.14
                        , Yampa       >= 0.9.6 && <0.15
                        , yampa-gloss
+                       , concurrent
   else
     buildable: False
 
